@@ -12,7 +12,14 @@ const HOST = "127.0.0.1";
 // ---------------------------------------------------------------------------
 // 1. Config management
 // ---------------------------------------------------------------------------
-const CONFIG_PATH = path.join(__dirname, "config.json");
+// Store config in user's data directory (not package install dir)
+const CONFIG_DIR = path.join(
+  process.env.XDG_CONFIG_HOME || (process.platform === "darwin"
+    ? path.join(os.homedir(), "Library", "Application Support")
+    : path.join(os.homedir(), ".config")),
+  "opencode-dashboard"
+);
+const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
 const DEFAULT_PRESETS = {
   win32: [
@@ -277,6 +284,7 @@ function loadConfig() {
 }
 
 function saveConfig(config) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
