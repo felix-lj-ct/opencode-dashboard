@@ -1,0 +1,43 @@
+{
+  "terminal": {
+    "name": "Windows Terminal (fish)",
+    "command": "wt.exe",
+    "args": "-p fish -d {dir} -- fish -C opencode"
+  },
+  "hiddenDirs": [
+    "C:\\Users\\user\\Desktop\\New folder (4)"
+  ],
+  "language": "en",
+  "projectFields": [
+    "session_count",
+    "tokens",
+    "tokens_input",
+    "tokens_output",
+    "tokens_reasoning",
+    "tokens_cache_read",
+    "tokens_cache_write",
+    "cost",
+    "changes",
+    "additions",
+    "deletions",
+    "files_changed",
+    "last_used"
+  ],
+  "sessionColumns": [
+    "title",
+    "agent",
+    "model",
+    "time_updated",
+    "tokens",
+    "tokens_input",
+    "tokens_output",
+    "tokens_reasoning",
+    "cost",
+    "changes",
+    "additions",
+    "deletions",
+    "files_changed",
+    "time_created",
+    "version"
+  ]
+}
