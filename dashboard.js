@@ -151,7 +151,7 @@ const I18N = {
     // DB path
     dbPath: "Database Path",
     dbPathHint: "Path to opencode.db. Leave empty to auto-detect. Press Enter to save.",
-    dbPathPlaceholder: "e.g. C:\\Users\\you\\.local\\share\\opencode\\opencode.db",
+    dbPathPlaceholderPrefix: "e.g. ",
     dbNotFound: "Database not found. Please configure the path to opencode.db in Settings.",
     dbNotFoundShort: "opencode.db not found",
     dbAutoDetected: "Auto-detected",
@@ -220,7 +220,7 @@ const I18N = {
     commandRequired: "命令不能为空",
     dbPath: "数据库路径",
     dbPathHint: "opencode.db 文件路径，留空则自动查找。按 Enter 保存。",
-    dbPathPlaceholder: "例如 C:\\Users\\you\\.local\\share\\opencode\\opencode.db",
+    dbPathPlaceholderPrefix: "例如 ",
     dbNotFound: "未找到数据库文件，请在设置中配置 opencode.db 的路径。",
     dbNotFoundShort: "未找到 opencode.db",
     dbAutoDetected: "自动检测",
@@ -1059,20 +1059,43 @@ function buildHTML(data, dbInfo) {
   .modal-overlay.open { display: flex; }
   .modal {
     background: #161b22; border: 1px solid #30363d; border-radius: 12px;
-    width: 560px; max-width: 90vw; max-height: 80vh; overflow-y: auto;
+    width: 560px; max-width: 90vw; max-height: 80vh;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    display: flex; flex-direction: column; overflow: hidden;
   }
   .modal-header {
     padding: 20px 24px; border-bottom: 1px solid #30363d;
     display: flex; justify-content: space-between; align-items: center;
+    flex-shrink: 0;
   }
   .modal-header h2 { font-size: 18px; color: #f0f6fc; }
   .modal-close {
-    background: none; border: none; color: #8b949e; font-size: 20px;
-    cursor: pointer; padding: 4px 8px; border-radius: 4px;
+    background: transparent; border: none; color: #8b949e;
+    cursor: pointer; padding: 0; border-radius: 8px;
+    width: 32px; height: 32px;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background 0.15s ease, color 0.15s ease, transform 0.15s ease;
   }
+  .modal-close svg { width: 16px; height: 16px; display: block; }
   .modal-close:hover { background: #30363d; color: #f0f6fc; }
-  .modal-body { padding: 24px; }
+  .modal-close:active { transform: scale(0.92); }
+  .modal-close:focus-visible {
+    outline: none; box-shadow: 0 0 0 2px #58a6ff;
+  }
+  .modal-body { padding: 24px; overflow-y: auto; flex: 1 1 auto; }
+
+  /* Custom scrollbar for the modal body (WebKit) */
+  .modal-body::-webkit-scrollbar { width: 10px; }
+  .modal-body::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .modal-body::-webkit-scrollbar-thumb {
+    background: #30363d; border-radius: 8px;
+    border: 2px solid #161b22; /* creates inset effect matching modal bg */
+  }
+  .modal-body::-webkit-scrollbar-thumb:hover { background: #484f58; }
+  /* Firefox */
+  .modal-body { scrollbar-width: thin; scrollbar-color: #30363d transparent; }
 
   .form-group { margin-bottom: 20px; }
   .form-label {
@@ -1297,13 +1320,17 @@ function buildHTML(data, dbInfo) {
   <div class="modal">
     <div class="modal-header">
       <h2>${L.settingsTitle}</h2>
-      <button class="modal-close" onclick="closeSettings()">&times;</button>
+      <button class="modal-close" onclick="closeSettings()" aria-label="Close">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M3 3 L13 13 M13 3 L3 13"/>
+        </svg>
+      </button>
     </div>
     <div class="modal-body">
       <h3 class="settings-section-title">${L.dbPath}</h3>
       <div class="form-hint">${L.dbPathHint}</div>
       <div class="db-path-row">
-        <input class="form-input" id="dbPathInput" placeholder="${L.dbPathPlaceholder}" value="${escapeHTML(currentConfig.dbPath || "")}" onkeydown="if(event.key==='Enter')saveDbPath()">
+        <input class="form-input" id="dbPathInput" placeholder="${escapeHTML(L.dbPathPlaceholderPrefix + (getDbCandidates()[0] || ""))}" value="${escapeHTML(currentConfig.dbPath || "")}" onkeydown="if(event.key==='Enter')saveDbPath()">
       </div>
       <div class="db-path-status" id="dbPathStatus">
         ${hasData
