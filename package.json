@@ -12,7 +12,8 @@
   "files": [
     "dashboard.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/images/*.png"
   ],
   "dependencies": {
     "sql.js": "^1.11.0"

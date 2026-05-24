@@ -2,12 +2,15 @@
 
 Local web dashboard for browsing OpenCode session history across all your projects.
 
+![Dashboard overview](docs/images/dashboard.png)
+
 ## Features
 
 - Browse all projects with session counts, token usage, and code change stats
 - Expand any project to see its recent sessions (title, agent, model, tokens, changes)
 - Click **Open** to launch a terminal with `opencode` in that project directory
 - Global stats overview (total sessions, tokens, lines added/deleted, files changed)
+- Customizable project card fields and session table columns
 - Cross-platform: Windows, macOS, Linux
 
 ## Requirements
@@ -39,6 +42,28 @@ node dashboard.js
 The dashboard will auto-open in your browser at `http://127.0.0.1:19860`.
 
 Press `Ctrl+C` to stop.
+
+## Configuration
+
+Open **Settings** (top-right) to customize the dashboard.
+
+### Terminal
+
+Pick a preset or define a custom terminal command. `{dir}` is replaced with the
+project directory when you click **Open** on a project card.
+
+![Terminal picker](docs/images/terminal-picker.png)
+
+Presets include Windows Terminal (fish / PowerShell / CMD), bare PowerShell,
+and CMD. On macOS/Linux you can supply your own command (e.g. `alacritty`,
+`wezterm`, `kitty`, `gnome-terminal`).
+
+### Card & table columns
+
+Choose exactly which stats appear on each project card and which columns show
+up in the per-project session table.
+
+![Customize project card fields and session table columns](docs/images/customize-fields.png)
 
 ## How It Works
 
