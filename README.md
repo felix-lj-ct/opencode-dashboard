@@ -16,6 +16,20 @@ Local web dashboard for browsing OpenCode session history across all your projec
 
 ## Quick Start
 
+Install globally via npm:
+
+```bash
+npm install -g @felixli-ct/opencode-dashboard@latest
+```
+
+Then run:
+
+```bash
+opencode-dashboard
+```
+
+Or run from source:
+
 ```bash
 cd opencode-dashboard
 npm install
