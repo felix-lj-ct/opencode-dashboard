@@ -555,7 +555,14 @@ function makeFieldResolver(schema) {
         {
           requires: ["message.data"],
           per_session_from_t: "t.model",
-          cte_select: "(json_extract(m.data, '$.providerID') || '/' || json_extract(m.data, '$.modelID')) AS model",
+          // Compose "providerID/modelID". The modelID field has historically been
+          // either a plain string or a JSON object {id, providerID, variant}.
+          // COALESCE drains to the right form when json_extract returns NULL for
+          // the non-matching shape.
+          cte_select:
+            "(COALESCE(json_extract(m.data, '$.providerID'), json_extract(m.data, '$.modelID.providerID')) " +
+            "|| '/' || " +
+            "COALESCE(json_extract(m.data, '$.modelID.id'), json_extract(m.data, '$.modelID'))) AS model",
         },
       ],
     },
@@ -608,7 +615,7 @@ function makeFieldResolver(schema) {
   }
   function perSessionExpr(name) {
     const r = resolved[name];
-    if (!r.candidate) return r.fallback;
+    if (!r.candidate) return `${r.fallback} AS ${name}`;
     if (r.candidate.per_session_select) {
       // Already an "expr AS alias" form
       return r.candidate.per_session_select;
