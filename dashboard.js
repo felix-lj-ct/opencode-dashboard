@@ -341,64 +341,411 @@ function findDatabase() {
 // ---------------------------------------------------------------------------
 // 3. Read data from SQLite via sql.js
 // ---------------------------------------------------------------------------
+
+// Introspect the database schema: return a map of tableName -> Set of column names.
+function introspectSchema(db) {
+  const schema = {};
+  const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table'");
+  if (tables.length === 0) return schema;
+  for (const row of tables[0].values) {
+    const t = row[0];
+    const cols = db.exec(`PRAGMA table_info(${t})`);
+    schema[t] = new Set(cols.length > 0 ? cols[0].values.map(v => v[1]) : []);
+  }
+  return schema;
+}
+
+// Build a field resolver bound to a given schema.
+//
+// FIELD_MAP defines, for each logical field name, a list of candidate
+// expressions to try in order. Each candidate has:
+//   - requires: array of "table.column" the candidate depends on
+//   - per-context expressions:
+//       agg_session_scope (s = session row in a GROUP BY s.directory query)
+//       per_session_join  (returns a SELECT clause for a CTE keyed by session_id;
+//                          the CTE is aliased as `t`)
+//       global_scalar     (a scalar subquery for the global-stats SELECT)
+//
+// When no candidate is satisfied by the current schema, the resolver falls back
+// to a constant (typically `0` for numerics, `NULL` for text/identifiers) and
+// records the field as "missing" so we can log it once at startup.
+function makeFieldResolver(schema) {
+  const has = (tableCol) => {
+    const [t, c] = tableCol.split(".");
+    return schema[t] && schema[t].has(c);
+  };
+
+  // assistant-message JSON predicate (used in multiple candidates)
+  const assistantWhere = "json_extract(m.data, '$.role') = 'assistant'";
+
+  const FIELD_MAP = {
+    // ---- Numeric token/cost fields ----
+    tokens_input: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.tokens_input"],
+          agg_session_scope: "COALESCE(SUM(s.tokens_input), 0)",
+          per_session_select: "s.tokens_input AS tokens_input",
+          per_session_from_t: "COALESCE(t.tokens_input, 0)",
+          global_scalar: "COALESCE((SELECT SUM(tokens_input) FROM session), 0)",
+        },
+        {
+          requires: ["message.data"],
+          // For agg in project stats we rely on the t CTE (sum joined per session)
+          agg_session_scope: "COALESCE(SUM(t.tokens_input), 0)",
+          per_session_from_t: "COALESCE(t.tokens_input, 0)",
+          // CTE source line:
+          cte_select: "SUM(json_extract(m.data, '$.tokens.input')) AS tokens_input",
+          global_scalar: `COALESCE((SELECT SUM(json_extract(m.data, '$.tokens.input')) FROM message m WHERE ${assistantWhere}), 0)`,
+        },
+      ],
+    },
+    tokens_output: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.tokens_output"],
+          agg_session_scope: "COALESCE(SUM(s.tokens_output), 0)",
+          per_session_select: "s.tokens_output AS tokens_output",
+          per_session_from_t: "COALESCE(t.tokens_output, 0)",
+          global_scalar: "COALESCE((SELECT SUM(tokens_output) FROM session), 0)",
+        },
+        {
+          requires: ["message.data"],
+          agg_session_scope: "COALESCE(SUM(t.tokens_output), 0)",
+          per_session_from_t: "COALESCE(t.tokens_output, 0)",
+          cte_select: "SUM(json_extract(m.data, '$.tokens.output')) AS tokens_output",
+          global_scalar: `COALESCE((SELECT SUM(json_extract(m.data, '$.tokens.output')) FROM message m WHERE ${assistantWhere}), 0)`,
+        },
+      ],
+    },
+    tokens_reasoning: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.tokens_reasoning"],
+          agg_session_scope: "COALESCE(SUM(s.tokens_reasoning), 0)",
+          per_session_select: "s.tokens_reasoning AS tokens_reasoning",
+          per_session_from_t: "COALESCE(t.tokens_reasoning, 0)",
+          global_scalar: "COALESCE((SELECT SUM(tokens_reasoning) FROM session), 0)",
+        },
+        {
+          requires: ["message.data"],
+          agg_session_scope: "COALESCE(SUM(t.tokens_reasoning), 0)",
+          per_session_from_t: "COALESCE(t.tokens_reasoning, 0)",
+          cte_select: "SUM(json_extract(m.data, '$.tokens.reasoning')) AS tokens_reasoning",
+          global_scalar: `COALESCE((SELECT SUM(json_extract(m.data, '$.tokens.reasoning')) FROM message m WHERE ${assistantWhere}), 0)`,
+        },
+      ],
+    },
+    tokens_cache_read: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.tokens_cache_read"],
+          agg_session_scope: "COALESCE(SUM(s.tokens_cache_read), 0)",
+          per_session_from_t: "COALESCE(t.tokens_cache_read, 0)",
+          global_scalar: "COALESCE((SELECT SUM(tokens_cache_read) FROM session), 0)",
+        },
+        {
+          requires: ["message.data"],
+          agg_session_scope: "COALESCE(SUM(t.tokens_cache_read), 0)",
+          per_session_from_t: "COALESCE(t.tokens_cache_read, 0)",
+          cte_select: "SUM(json_extract(m.data, '$.tokens.cache.read')) AS tokens_cache_read",
+          global_scalar: `COALESCE((SELECT SUM(json_extract(m.data, '$.tokens.cache.read')) FROM message m WHERE ${assistantWhere}), 0)`,
+        },
+      ],
+    },
+    tokens_cache_write: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.tokens_cache_write"],
+          agg_session_scope: "COALESCE(SUM(s.tokens_cache_write), 0)",
+          per_session_from_t: "COALESCE(t.tokens_cache_write, 0)",
+          global_scalar: "COALESCE((SELECT SUM(tokens_cache_write) FROM session), 0)",
+        },
+        {
+          requires: ["message.data"],
+          agg_session_scope: "COALESCE(SUM(t.tokens_cache_write), 0)",
+          per_session_from_t: "COALESCE(t.tokens_cache_write, 0)",
+          cte_select: "SUM(json_extract(m.data, '$.tokens.cache.write')) AS tokens_cache_write",
+          global_scalar: `COALESCE((SELECT SUM(json_extract(m.data, '$.tokens.cache.write')) FROM message m WHERE ${assistantWhere}), 0)`,
+        },
+      ],
+    },
+    cost: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.cost"],
+          agg_session_scope: "COALESCE(SUM(s.cost), 0)",
+          per_session_select: "s.cost AS cost",
+          per_session_from_t: "COALESCE(t.cost, 0)",
+          global_scalar: "COALESCE((SELECT SUM(cost) FROM session), 0)",
+        },
+        {
+          requires: ["message.data"],
+          agg_session_scope: "COALESCE(SUM(t.cost), 0)",
+          per_session_from_t: "COALESCE(t.cost, 0)",
+          cte_select: "SUM(json_extract(m.data, '$.cost')) AS cost",
+          global_scalar: `COALESCE((SELECT SUM(json_extract(m.data, '$.cost')) FROM message m WHERE ${assistantWhere}), 0)`,
+        },
+      ],
+    },
+
+    // ---- Summary line-change fields ----
+    additions: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.summary_additions"],
+          agg_session_scope: "COALESCE(SUM(s.summary_additions), 0)",
+          per_session_select: "s.summary_additions AS summary_additions",
+          global_scalar: "COALESCE((SELECT SUM(summary_additions) FROM session), 0)",
+        },
+      ],
+    },
+    deletions: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.summary_deletions"],
+          agg_session_scope: "COALESCE(SUM(s.summary_deletions), 0)",
+          per_session_select: "s.summary_deletions AS summary_deletions",
+          global_scalar: "COALESCE((SELECT SUM(summary_deletions) FROM session), 0)",
+        },
+      ],
+    },
+    files_changed: {
+      fallback: "0",
+      candidates: [
+        {
+          requires: ["session.summary_files"],
+          agg_session_scope: "COALESCE(SUM(s.summary_files), 0)",
+          per_session_select: "s.summary_files AS summary_files",
+          global_scalar: "COALESCE((SELECT SUM(summary_files) FROM session), 0)",
+        },
+      ],
+    },
+
+    // ---- Per-session text fields (only used in per-session SELECT) ----
+    agent: {
+      fallback: "NULL",
+      candidates: [
+        {
+          requires: ["session.agent"],
+          per_session_select: "s.agent AS agent",
+        },
+        {
+          requires: ["message.data"],
+          per_session_from_t: "t.agent",
+          cte_select: "json_extract(m.data, '$.agent') AS agent",
+        },
+      ],
+    },
+    model: {
+      fallback: "NULL",
+      candidates: [
+        {
+          requires: ["session.model"],
+          per_session_select: "s.model AS model",
+        },
+        {
+          requires: ["message.data"],
+          per_session_from_t: "t.model",
+          cte_select: "(json_extract(m.data, '$.providerID') || '/' || json_extract(m.data, '$.modelID')) AS model",
+        },
+      ],
+    },
+  };
+
+  const missing = [];
+  const resolved = {}; // fieldName -> { candidate, fallback } | { fallback }
+
+  for (const [name, def] of Object.entries(FIELD_MAP)) {
+    const pick = def.candidates.find(c => c.requires.every(has));
+    if (pick) {
+      resolved[name] = { candidate: pick, fallback: def.fallback };
+    } else {
+      resolved[name] = { candidate: null, fallback: def.fallback };
+      missing.push(name);
+    }
+  }
+
+  // Whether any field needs the per-session message CTE (`t`)
+  const needsMessageCTE = Object.values(resolved).some(r => {
+    if (!r.candidate) return false;
+    return r.candidate.requires.includes("message.data") &&
+      (r.candidate.cte_select || r.candidate.per_session_from_t);
+  });
+
+  // Build the CTE body (only for fields whose chosen candidate is the message
+  // JSON one). Always includes session_id key.
+  let cteBody = null;
+  if (needsMessageCTE) {
+    const cteLines = ["session_id"];
+    for (const [name, r] of Object.entries(resolved)) {
+      if (r.candidate && r.candidate.requires.includes("message.data") && r.candidate.cte_select) {
+        cteLines.push(r.candidate.cte_select);
+      }
+    }
+    cteBody = `
+      SELECT
+        ${cteLines.join(",\n        ")}
+      FROM message m
+      WHERE ${assistantWhere}
+      GROUP BY session_id
+    `;
+  }
+
+  // Helpers used by query builders
+  function aggExpr(name) {
+    const r = resolved[name];
+    if (r.candidate && r.candidate.agg_session_scope) return r.candidate.agg_session_scope;
+    return r.fallback;
+  }
+  function perSessionExpr(name) {
+    const r = resolved[name];
+    if (!r.candidate) return r.fallback;
+    if (r.candidate.per_session_select) {
+      // Already an "expr AS alias" form
+      return r.candidate.per_session_select;
+    }
+    if (r.candidate.per_session_from_t) {
+      return `${r.candidate.per_session_from_t} AS ${name}`;
+    }
+    return `${r.fallback} AS ${name}`;
+  }
+  function globalScalar(name) {
+    const r = resolved[name];
+    if (r.candidate && r.candidate.global_scalar) return r.candidate.global_scalar;
+    return r.fallback;
+  }
+
+  return {
+    resolved,
+    missing,
+    needsMessageCTE,
+    cteBody,
+    aggExpr,
+    perSessionExpr,
+    globalScalar,
+  };
+}
+
+let _missingWarned = false;
+function warnMissingOnce(missing) {
+  if (_missingWarned || missing.length === 0) return;
+  _missingWarned = true;
+  console.warn(
+    `Note: ${missing.length} field(s) not available in current opencode schema, ` +
+    `falling back to 0/NULL: ${missing.join(", ")}`
+  );
+}
+
 async function loadData(dbPath) {
   const initSqlJs = require("sql.js");
   const SQL = await initSqlJs();
   const buffer = fs.readFileSync(dbPath);
   const db = new SQL.Database(buffer);
 
-  // Group by actual session directory (not project worktree)
+  // 1) Introspect schema, build a field resolver
+  const schema = introspectSchema(db);
+  const F = makeFieldResolver(schema);
+  warnMissingOnce(F.missing);
+
+  // session table must at least have id/directory/time_updated to do anything
+  const sessionCols = schema.session || new Set();
+  if (!sessionCols.has("id") || !sessionCols.has("directory") || !sessionCols.has("time_updated")) {
+    console.error("Session table missing required base columns (id/directory/time_updated). Aborting load.");
+    db.close();
+    return { globalStats: {}, projectStats: [], sessionsByDir: {} };
+  }
+
+  const cteClause = F.needsMessageCTE
+    ? `WITH session_tokens AS (${F.cteBody})`
+    : "";
+  const joinClause = F.needsMessageCTE
+    ? "LEFT JOIN session_tokens t ON t.session_id = s.id"
+    : "";
+
+  // 2) Project stats (grouped by session.directory)
   const projectStats = [];
-  const statsStmt = db.prepare(`
+  const statsSql = `
+    ${cteClause}
     SELECT
       s.directory AS directory,
       COUNT(s.id) AS session_count,
       MAX(s.time_updated) AS last_used,
-      COALESCE(SUM(s.tokens_input), 0) AS tokens_input,
-      COALESCE(SUM(s.tokens_output), 0) AS tokens_output,
-      COALESCE(SUM(s.tokens_reasoning), 0) AS tokens_reasoning,
-      COALESCE(SUM(s.tokens_cache_read), 0) AS tokens_cache_read,
-      COALESCE(SUM(s.tokens_cache_write), 0) AS tokens_cache_write,
-      COALESCE(SUM(s.cost), 0) AS cost,
-      COALESCE(SUM(s.summary_additions), 0) AS additions,
-      COALESCE(SUM(s.summary_deletions), 0) AS deletions,
-      COALESCE(SUM(s.summary_files), 0) AS files_changed
+      ${F.aggExpr("tokens_input")} AS tokens_input,
+      ${F.aggExpr("tokens_output")} AS tokens_output,
+      ${F.aggExpr("tokens_reasoning")} AS tokens_reasoning,
+      ${F.aggExpr("tokens_cache_read")} AS tokens_cache_read,
+      ${F.aggExpr("tokens_cache_write")} AS tokens_cache_write,
+      ${F.aggExpr("cost")} AS cost,
+      ${F.aggExpr("additions")} AS additions,
+      ${F.aggExpr("deletions")} AS deletions,
+      ${F.aggExpr("files_changed")} AS files_changed
     FROM session s
+    ${joinClause}
     WHERE s.directory != ''
     GROUP BY s.directory
     ORDER BY last_used DESC
-  `);
+  `;
+  const statsStmt = db.prepare(statsSql);
   while (statsStmt.step()) projectStats.push(statsStmt.getAsObject());
   statsStmt.free();
 
-  const globalStmt = db.prepare(`
+  // 3) Global stats (scalar subqueries; no need to share the CTE)
+  const globalSql = `
     SELECT
-      COUNT(*) AS total_sessions,
-      COALESCE(SUM(tokens_input), 0) AS tokens_input,
-      COALESCE(SUM(tokens_output), 0) AS tokens_output,
-      COALESCE(SUM(tokens_reasoning), 0) AS tokens_reasoning,
-      COALESCE(SUM(tokens_cache_read), 0) AS tokens_cache_read,
-      COALESCE(SUM(tokens_cache_write), 0) AS tokens_cache_write,
-      COALESCE(SUM(cost), 0) AS cost,
-      COALESCE(SUM(summary_additions), 0) AS additions,
-      COALESCE(SUM(summary_deletions), 0) AS deletions,
-      COALESCE(SUM(summary_files), 0) AS files_changed
-    FROM session
-  `);
+      (SELECT COUNT(*) FROM session) AS total_sessions,
+      ${F.globalScalar("tokens_input")} AS tokens_input,
+      ${F.globalScalar("tokens_output")} AS tokens_output,
+      ${F.globalScalar("tokens_reasoning")} AS tokens_reasoning,
+      ${F.globalScalar("tokens_cache_read")} AS tokens_cache_read,
+      ${F.globalScalar("tokens_cache_write")} AS tokens_cache_write,
+      ${F.globalScalar("cost")} AS cost,
+      ${F.globalScalar("additions")} AS additions,
+      ${F.globalScalar("deletions")} AS deletions,
+      ${F.globalScalar("files_changed")} AS files_changed
+  `;
+  const globalStmt = db.prepare(globalSql);
   globalStmt.step();
   const globalStats = globalStmt.getAsObject();
   globalStmt.free();
 
+  // 4) Sessions per directory
+  // version column is optional; include only if it exists
+  const versionCol = sessionCols.has("version") ? "s.version" : "NULL AS version";
+  const timeCreatedCol = sessionCols.has("time_created") ? "s.time_created" : "NULL AS time_created";
+  const titleCol = sessionCols.has("title") ? "s.title" : "NULL AS title";
+
+  const sessSql = `
+    ${cteClause}
+    SELECT
+      s.id, ${titleCol}, s.directory, ${versionCol},
+      ${timeCreatedCol}, s.time_updated,
+      ${F.perSessionExpr("agent")},
+      ${F.perSessionExpr("model")},
+      ${F.perSessionExpr("tokens_input")},
+      ${F.perSessionExpr("tokens_output")},
+      ${F.perSessionExpr("tokens_reasoning")},
+      ${F.perSessionExpr("cost")},
+      ${F.perSessionExpr("additions")},
+      ${F.perSessionExpr("deletions")},
+      ${F.perSessionExpr("files_changed")}
+    FROM session s
+    ${joinClause}
+    WHERE s.directory = ?
+    ORDER BY s.time_updated DESC LIMIT 20
+  `;
+
   const sessionsByDir = {};
   for (const proj of projectStats) {
-    const sessStmt = db.prepare(`
-      SELECT id, title, directory, agent, model, cost, version,
-        tokens_input, tokens_output, tokens_reasoning,
-        summary_additions, summary_deletions, summary_files,
-        time_created, time_updated
-      FROM session WHERE directory = ?
-      ORDER BY time_updated DESC LIMIT 20
-    `);
+    const sessStmt = db.prepare(sessSql);
     sessStmt.bind([proj.directory]);
     const sessions = [];
     while (sessStmt.step()) sessions.push(sessStmt.getAsObject());
