@@ -281,11 +281,11 @@ async function main() {
 
       // POST /api/update — run npm install -g to update to latest
       if (req.method === "POST" && req.url === "/api/update") {
-        const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
         try {
           const result = await new Promise((resolve, reject) => {
-            execFile(npmCmd, ["install", "-g", `${PKG_NAME}@latest`], {
+            execFile("npm", ["install", "-g", `${PKG_NAME}@latest`], {
               timeout: 120000,
+              shell: true,
             }, (err, stdout, stderr) => {
               if (err) reject(new Error(stderr || err.message));
               else resolve(stdout);
