@@ -11,6 +11,7 @@
   },
   "files": [
     "dashboard.js",
+    "lib/",
     "README.md",
     "LICENSE",
     "docs/images/*.png"
