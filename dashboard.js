@@ -24,6 +24,58 @@ const { buildHTML } = require("./lib/template");
 const { openBrowser, killPort } = require("./lib/browser");
 
 // ---------------------------------------------------------------------------
+// Helper: fetch latest version from npm registry
+// ---------------------------------------------------------------------------
+function fetchLatestVersion() {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 8000);
+    const url = `https://registry.npmjs.org/${PKG_NAME}/latest`;
+    const npmReq = https.get(url, { timeout: 5000 }, (resp) => {
+      let body = "";
+      resp.on("data", (chunk) => (body += chunk));
+      resp.on("end", () => {
+        clearTimeout(timer);
+        try { resolve(JSON.parse(body).version || null); }
+        catch { resolve(null); }
+      });
+    });
+    npmReq.on("error", () => { clearTimeout(timer); resolve(null); });
+    npmReq.on("timeout", () => { clearTimeout(timer); npmReq.destroy(); resolve(null); });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Helper: compare semver strings, returns -1, 0, or 1
+// ---------------------------------------------------------------------------
+function compareVersions(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: run npm install -g to update
+// ---------------------------------------------------------------------------
+function runNpmUpdate() {
+  return new Promise((resolve, reject) => {
+    execFile("npm", ["install", "-g", `${PKG_NAME}@latest`], {
+      timeout: 120000,
+      shell: true,
+    }, (err, stdout, stderr) => {
+      if (err) reject(new Error(stderr || err.message));
+      else resolve(stdout);
+    });
+  });
+}
+
+// Startup auto-update result (null = not attempted, object = result)
+let autoUpdateResult = null;
+
+// ---------------------------------------------------------------------------
 // Empty data structure when DB is not available
 // ---------------------------------------------------------------------------
 function emptyData() {
@@ -72,6 +124,33 @@ async function main() {
     console.log("No database found. Starting with empty data.");
     console.log("Users can configure the database path in Settings.");
     data = emptyData();
+  }
+
+  // -----------------------------------------------------------------------
+  // Startup auto-update (non-blocking, best-effort)
+  // -----------------------------------------------------------------------
+  if (currentConfig.autoUpdate) {
+    console.log("Auto-update enabled, checking for updates...");
+    try {
+      const latest = await fetchLatestVersion();
+      if (latest && compareVersions(PKG_VERSION, latest) < 0) {
+        console.log(`New version available: ${PKG_VERSION} -> ${latest}, updating...`);
+        try {
+          const output = await runNpmUpdate();
+          console.log("Auto-update succeeded:", output.trim());
+          autoUpdateResult = { ok: true, from: PKG_VERSION, to: latest };
+        } catch (updateErr) {
+          console.warn("Auto-update failed:", updateErr.message);
+          autoUpdateResult = { ok: false, error: updateErr.message };
+        }
+      } else if (latest) {
+        console.log(`Already up to date (${PKG_VERSION})`);
+      } else {
+        console.log("Could not check for updates (network issue), skipping.");
+      }
+    } catch (e) {
+      console.warn("Auto-update check error:", e.message);
+    }
   }
 
   let html = buildHTML(data, dbResult, PKG_VERSION);
@@ -253,45 +332,22 @@ async function main() {
         return;
       }
 
-      // GET /api/version — current version + latest from npm registry
+      // GET /api/version — current version + latest from npm registry + auto-update result
       if (req.method === "GET" && req.url === "/api/version") {
-        // Fetch latest version from npm registry with hard timeout
-        const latest = await new Promise((resolve) => {
-          const timer = setTimeout(() => {
-            req.destroy && req.destroy();
-            resolve(null);
-          }, 8000);
-          const url = `https://registry.npmjs.org/${PKG_NAME}/latest`;
-          const npmReq = https.get(url, { timeout: 5000 }, (resp) => {
-            let body = "";
-            resp.on("data", (chunk) => (body += chunk));
-            resp.on("end", () => {
-              clearTimeout(timer);
-              try { resolve(JSON.parse(body).version || null); }
-              catch { resolve(null); }
-            });
-          });
-          npmReq.on("error", () => { clearTimeout(timer); resolve(null); });
-          npmReq.on("timeout", () => { clearTimeout(timer); npmReq.destroy(); resolve(null); });
-        });
+        const latest = await fetchLatestVersion();
+        const resp = { ok: true, current: PKG_VERSION, latest, autoUpdate: getConfig().autoUpdate || false };
+        if (autoUpdateResult) resp.autoUpdateResult = autoUpdateResult;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, current: PKG_VERSION, latest }));
+        res.end(JSON.stringify(resp));
         return;
       }
 
       // POST /api/update — run npm install -g to update to latest
       if (req.method === "POST" && req.url === "/api/update") {
         try {
-          const result = await new Promise((resolve, reject) => {
-            execFile("npm", ["install", "-g", `${PKG_NAME}@latest`], {
-              timeout: 120000,
-              shell: true,
-            }, (err, stdout, stderr) => {
-              if (err) reject(new Error(stderr || err.message));
-              else resolve(stdout);
-            });
-          });
+          const result = await runNpmUpdate();
           console.log("Update result:", result);
+          autoUpdateResult = { ok: true, from: PKG_VERSION, to: "latest" };
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true, output: result }));
         } catch (updateErr) {
@@ -299,6 +355,18 @@ async function main() {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: false, error: updateErr.message }));
         }
+        return;
+      }
+
+      // POST /api/auto-update — toggle auto-update setting
+      if (req.method === "POST" && req.url === "/api/auto-update") {
+        const { enabled } = await readBody(req);
+        const cfg = getConfig();
+        cfg.autoUpdate = !!enabled;
+        setConfig(cfg);
+        saveConfig(cfg);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, autoUpdate: cfg.autoUpdate }));
         return;
       }
 
