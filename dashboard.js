@@ -652,16 +652,38 @@ function warnMissingOnce(missing) {
   );
 }
 
+// Cache sql.js WASM engine instance to avoid re-initializing on every loadData call
+let _cachedSQL = null;
+async function getSqlJs() {
+  if (!_cachedSQL) {
+    const initSqlJs = require("sql.js");
+    _cachedSQL = await initSqlJs();
+  }
+  return _cachedSQL;
+}
+
+// Cache schema introspection & field resolver to skip rebuild when DB file hasn't changed
+let _schemaCache = { path: null, mtime: 0, size: 0, schema: null, resolver: null };
+
 async function loadData(dbPath) {
-  const initSqlJs = require("sql.js");
-  const SQL = await initSqlJs();
+  const SQL = await getSqlJs();
   const buffer = fs.readFileSync(dbPath);
   const db = new SQL.Database(buffer);
 
-  // 1) Introspect schema, build a field resolver
-  const schema = introspectSchema(db);
-  const F = makeFieldResolver(schema);
-  warnMissingOnce(F.missing);
+  // 1) Introspect schema, build a field resolver (cached by file mtime+size)
+  const stat = fs.statSync(dbPath);
+  const dbMtime = stat.mtimeMs;
+  const dbSize = stat.size;
+  let schema, F;
+  if (_schemaCache.schema && _schemaCache.path === dbPath && _schemaCache.mtime === dbMtime && _schemaCache.size === dbSize) {
+    schema = _schemaCache.schema;
+    F = _schemaCache.resolver;
+  } else {
+    schema = introspectSchema(db);
+    F = makeFieldResolver(schema);
+    _schemaCache = { path: dbPath, mtime: dbMtime, size: dbSize, schema, resolver: F };
+    warnMissingOnce(F.missing);
+  }
 
   // session table must at least have id/directory/time_updated to do anything
   const sessionCols = schema.session || new Set();
@@ -730,35 +752,40 @@ async function loadData(dbPath) {
   const timeCreatedCol = sessionCols.has("time_created") ? "s.time_created" : "NULL AS time_created";
   const titleCol = sessionCols.has("title") ? "s.title" : "NULL AS title";
 
+  // Use ROW_NUMBER() window function to fetch top-20 sessions per directory
+  // in a single query instead of N separate queries (one per project).
   const sessSql = `
     ${cteClause}
-    SELECT
-      s.id, ${titleCol}, s.directory, ${versionCol},
-      ${timeCreatedCol}, s.time_updated,
-      ${F.perSessionExpr("agent")},
-      ${F.perSessionExpr("model")},
-      ${F.perSessionExpr("tokens_input")},
-      ${F.perSessionExpr("tokens_output")},
-      ${F.perSessionExpr("tokens_reasoning")},
-      ${F.perSessionExpr("cost")},
-      ${F.perSessionExpr("additions")},
-      ${F.perSessionExpr("deletions")},
-      ${F.perSessionExpr("files_changed")}
-    FROM session s
-    ${joinClause}
-    WHERE s.directory = ?
-    ORDER BY s.time_updated DESC LIMIT 20
+    SELECT * FROM (
+      SELECT
+        s.id, ${titleCol}, s.directory, ${versionCol},
+        ${timeCreatedCol}, s.time_updated,
+        ${F.perSessionExpr("agent")},
+        ${F.perSessionExpr("model")},
+        ${F.perSessionExpr("tokens_input")},
+        ${F.perSessionExpr("tokens_output")},
+        ${F.perSessionExpr("tokens_reasoning")},
+        ${F.perSessionExpr("cost")},
+        ${F.perSessionExpr("additions")},
+        ${F.perSessionExpr("deletions")},
+        ${F.perSessionExpr("files_changed")},
+        ROW_NUMBER() OVER (PARTITION BY s.directory ORDER BY s.time_updated DESC) AS _rn
+      FROM session s
+      ${joinClause}
+      WHERE s.directory != ''
+    ) WHERE _rn <= 20
   `;
 
   const sessionsByDir = {};
-  for (const proj of projectStats) {
-    const sessStmt = db.prepare(sessSql);
-    sessStmt.bind([proj.directory]);
-    const sessions = [];
-    while (sessStmt.step()) sessions.push(sessStmt.getAsObject());
-    sessStmt.free();
-    sessionsByDir[proj.directory] = sessions;
+  const sessStmt = db.prepare(sessSql);
+  while (sessStmt.step()) {
+    const row = sessStmt.getAsObject();
+    delete row._rn; // remove internal ranking column
+    const dir = row.directory;
+    if (!sessionsByDir[dir]) sessionsByDir[dir] = [];
+    sessionsByDir[dir].push(row);
   }
+  sessStmt.free();
 
   db.close();
   return { globalStats, projectStats, sessionsByDir };
