@@ -8,6 +8,7 @@ const { exec, spawn } = require("node:child_process");
 
 const PORT = 19860;
 const HOST = "127.0.0.1";
+const SESSIONS_PER_PAGE = 20;
 
 // ---------------------------------------------------------------------------
 // 1. Config management
@@ -93,6 +94,7 @@ const I18N = {
     // Global stats
     totalSessions: "Total Sessions",
     totalTokens: "Total Tokens",
+    totalCost: "Total Cost",
     cacheRead: "Cache Read",
     linesAdded: "Lines Added",
     linesDeleted: "Lines Deleted",
@@ -161,6 +163,9 @@ const I18N = {
     // Pagination
     prevPage: "Prev",
     nextPage: "Next",
+    // Load more sessions
+    loadMore: "Load More",
+    loadingMore: "Loading...",
   },
   zh: {
     title: "OpenCode 仪表盘",
@@ -171,6 +176,7 @@ const I18N = {
     showHidden: "显示隐藏",
     totalSessions: "总会话数",
     totalTokens: "总 Tokens",
+    totalCost: "总费用",
     cacheRead: "缓存读取",
     linesAdded: "新增行数",
     linesDeleted: "删除行数",
@@ -229,6 +235,8 @@ const I18N = {
     dbPathInvalid: "指定路径未找到数据库文件",
     prevPage: "上一页",
     nextPage: "下一页",
+    loadMore: "加载更多",
+    loadingMore: "加载中...",
   },
 };
 
@@ -719,7 +727,7 @@ async function loadData(dbPath) {
       ${F.aggExpr("files_changed")} AS files_changed
     FROM session s
     ${joinClause}
-    WHERE s.directory != ''
+    WHERE s.directory != ''${sessionCols.has("parent_session_id") ? " AND s.parent_session_id IS NULL" : ""}
     GROUP BY s.directory
     ORDER BY last_used DESC
   `;
@@ -751,6 +759,7 @@ async function loadData(dbPath) {
   const versionCol = sessionCols.has("version") ? "s.version" : "NULL AS version";
   const timeCreatedCol = sessionCols.has("time_created") ? "s.time_created" : "NULL AS time_created";
   const titleCol = sessionCols.has("title") ? "s.title" : "NULL AS title";
+  const parentCol = sessionCols.has("parent_session_id") ? "s.parent_session_id" : "NULL AS parent_session_id";
 
   // Use ROW_NUMBER() window function to fetch top-20 sessions per directory
   // in a single query instead of N separate queries (one per project).
@@ -759,7 +768,7 @@ async function loadData(dbPath) {
     SELECT * FROM (
       SELECT
         s.id, ${titleCol}, s.directory, ${versionCol},
-        ${timeCreatedCol}, s.time_updated,
+        ${timeCreatedCol}, s.time_updated, ${parentCol},
         ${F.perSessionExpr("agent")},
         ${F.perSessionExpr("model")},
         ${F.perSessionExpr("tokens_input")},
@@ -772,8 +781,8 @@ async function loadData(dbPath) {
         ROW_NUMBER() OVER (PARTITION BY s.directory ORDER BY s.time_updated DESC) AS _rn
       FROM session s
       ${joinClause}
-      WHERE s.directory != ''
-    ) WHERE _rn <= 20
+      WHERE s.directory != '' AND ${parentCol.startsWith("s.") ? "s.parent_session_id IS NULL" : "1=1"}
+    ) WHERE _rn <= ${SESSIONS_PER_PAGE}
   `;
 
   const sessionsByDir = {};
@@ -789,6 +798,103 @@ async function loadData(dbPath) {
 
   db.close();
   return { globalStats, projectStats, sessionsByDir };
+}
+
+/**
+ * Query additional sessions for a specific directory with offset/limit,
+ * and return pre-rendered HTML table rows.
+ */
+async function queryMoreSessions(dbPath, directory, offset, limit) {
+  const SQL = await getSqlJs();
+  const buffer = fs.readFileSync(dbPath);
+  const db = new SQL.Database(buffer);
+
+  const stat = fs.statSync(dbPath);
+  let schema, F;
+  if (_schemaCache.schema && _schemaCache.path === dbPath && _schemaCache.mtime === stat.mtimeMs && _schemaCache.size === stat.size) {
+    schema = _schemaCache.schema;
+    F = _schemaCache.resolver;
+  } else {
+    schema = introspectSchema(db);
+    F = makeFieldResolver(schema);
+    _schemaCache = { path: dbPath, mtime: stat.mtimeMs, size: stat.size, schema, resolver: F };
+  }
+
+  const sessionCols = schema.session || new Set();
+  const versionCol = sessionCols.has("version") ? "s.version" : "NULL AS version";
+  const timeCreatedCol = sessionCols.has("time_created") ? "s.time_created" : "NULL AS time_created";
+  const titleCol = sessionCols.has("title") ? "s.title" : "NULL AS title";
+  const parentCol = sessionCols.has("parent_session_id") ? "s.parent_session_id" : "NULL AS parent_session_id";
+
+  const cteClause = F.needsMessageCTE ? `WITH session_tokens AS (${F.cteBody})` : "";
+  const joinClause = F.needsMessageCTE ? "LEFT JOIN session_tokens t ON t.session_id = s.id" : "";
+
+  const sql = `
+    ${cteClause}
+    SELECT
+      s.id, ${titleCol}, s.directory, ${versionCol},
+      ${timeCreatedCol}, s.time_updated, ${parentCol},
+      ${F.perSessionExpr("agent")},
+      ${F.perSessionExpr("model")},
+      ${F.perSessionExpr("tokens_input")},
+      ${F.perSessionExpr("tokens_output")},
+      ${F.perSessionExpr("tokens_reasoning")},
+      ${F.perSessionExpr("cost")},
+      ${F.perSessionExpr("additions")},
+      ${F.perSessionExpr("deletions")},
+      ${F.perSessionExpr("files_changed")}
+    FROM session s
+    ${joinClause}
+    WHERE s.directory = ? AND ${parentCol.startsWith("s.") ? "s.parent_session_id IS NULL" : "1=1"}
+    ORDER BY s.time_updated DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
+
+  const sessions = [];
+  const stmt = db.prepare(sql);
+  stmt.bind([directory]);
+  while (stmt.step()) sessions.push(stmt.getAsObject());
+  stmt.free();
+  db.close();
+
+  // Render HTML rows using the same logic as buildHTML
+  const L = getLang();
+  const sc = currentConfig.sessionColumns || getDefaults(SESSION_COLUMNS);
+
+  function renderCell(key, s) {
+    let modelName = "";
+    if (s.model) { try { modelName = JSON.parse(s.model).id || ""; } catch {} }
+    const defs = {
+      title:            `<td class="session-title" title="${escapeHTML(s.title || "")}">${escapeHTML(s.title || L.untitled)}</td>`,
+      agent:            `<td><span class="agent-badge agent-${escapeHTML(s.agent || "default")}">${escapeHTML(s.agent || "-")}</span></td>`,
+      model:            `<td class="model-name">${escapeHTML(modelName)}</td>`,
+      time_updated:     `<td class="time-cell">${formatRelativeTime(s.time_updated)}</td>`,
+      tokens:           `<td class="token-cell">${formatNumber(s.tokens_input + s.tokens_output)}</td>`,
+      tokens_input:     `<td class="token-cell">${formatNumber(s.tokens_input)}</td>`,
+      tokens_output:    `<td class="token-cell">${formatNumber(s.tokens_output)}</td>`,
+      tokens_reasoning: `<td class="token-cell">${formatNumber(s.tokens_reasoning || 0)}</td>`,
+      cost:             `<td class="token-cell">$${(s.cost || 0).toFixed(4)}</td>`,
+      changes:          `<td class="change-cell"><span class="additions">+${formatNumber(s.summary_additions || 0)}</span><span class="deletions">-${formatNumber(s.summary_deletions || 0)}</span></td>`,
+      additions:        `<td class="change-cell"><span class="additions">+${formatNumber(s.summary_additions || 0)}</span></td>`,
+      deletions:        `<td class="change-cell"><span class="deletions">-${formatNumber(s.summary_deletions || 0)}</span></td>`,
+      files_changed:    `<td class="token-cell">${formatNumber(s.summary_files || 0)}</td>`,
+      time_created:     `<td class="time-cell">${formatRelativeTime(s.time_created)}</td>`,
+      version:          `<td class="time-cell">${escapeHTML(s.version || "-")}</td>`,
+    };
+    return defs[key] || "<td>-</td>";
+  }
+
+  const NON_RESUMABLE_AGENTS = new Set(["explore", "general"]);
+  const rowsHTML = sessions.map((s) => {
+    const cells = sc.map((key) => renderCell(key, s)).join("");
+    const canResume = !s.parent_session_id && !NON_RESUMABLE_AGENTS.has(s.agent);
+    const resumeBtn = canResume
+      ? `<button class="resume-btn" onclick="event.stopPropagation(); openSession('${escapeHTML(s.directory.replace(/\\/g, "\\\\"))}', '${escapeHTML(s.id)}')" title="${L.resume}">${L.resume}</button>`
+      : "";
+    return `<tr class="session-row">${cells}<td class="action-cell">${resumeBtn}</td></tr>`;
+  }).join("");
+
+  return { rowsHTML, count: sessions.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -920,11 +1026,16 @@ function buildHTML(data, dbInfo) {
       const sessionRowsHTML = sessions
         .map((s) => {
           const cells = sc.map((key) => renderSessionCell(key, s)).join("");
+          const NON_RESUMABLE_AGENTS = new Set(["explore", "general"]);
+          const canResume = !s.parent_session_id && !NON_RESUMABLE_AGENTS.has(s.agent);
+          const resumeBtn = canResume
+            ? `<button class="resume-btn" onclick="event.stopPropagation(); openSession('${escapeHTML(s.directory.replace(/\\/g, "\\\\"))}', '${escapeHTML(s.id)}')" title="${L.resume}">${L.resume}</button>`
+            : "";
           return `
           <tr class="session-row">
             ${cells}
             <td class="action-cell">
-              <button class="resume-btn" onclick="event.stopPropagation(); openSession('${escapeHTML(s.directory.replace(/\\/g, "\\\\"))}', '${escapeHTML(s.id)}')" title="${L.resume}">${L.resume}</button>
+              ${resumeBtn}
             </td>
           </tr>`;
         })
@@ -948,8 +1059,11 @@ function buildHTML(data, dbInfo) {
         <div class="project-sessions" id="sessions-${cardId}" style="display:none;">
           <table class="session-table">
             <thead><tr>${thHTML}</tr></thead>
-            <tbody>${sessionRowsHTML}</tbody>
-          </table>
+            <tbody id="tbody-${cardId}">${sessionRowsHTML}</tbody>
+          </table>${p.session_count > sessions.length ? `
+          <div class="load-more-wrap" id="loadmore-${cardId}">
+            <button class="load-more-btn" data-dir="${escapeHTML(dir)}" data-loaded="${sessions.length}" data-total="${p.session_count}" onclick="loadMoreSessions(this, '${cardId}')">${L.loadMore} (${sessions.length}/${p.session_count})</button>
+          </div>` : ""}
         </div>
       </div>`;
     })
@@ -1255,6 +1369,18 @@ function buildHTML(data, dbInfo) {
   .db-status-ok { color: #3fb950; }
   .db-status-error { color: #f85149; }
 
+  /* Load More */
+  .load-more-wrap {
+    display: flex; justify-content: center; padding: 12px 0;
+  }
+  .load-more-btn {
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    border-radius: 6px; padding: 8px 24px; font-size: 13px;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .load-more-btn:hover { border-color: #58a6ff; color: #f0f6fc; }
+  .load-more-btn:disabled { opacity: 0.5; cursor: default; border-color: #30363d; color: #484f58; }
+
   /* Pagination */
   .pagination {
     display: flex; justify-content: center; align-items: center; gap: 4px;
@@ -1297,6 +1423,10 @@ function buildHTML(data, dbInfo) {
   <div class="global-stat">
     <span class="value">${formatNumber(globalStats.tokens_input + globalStats.tokens_output + globalStats.tokens_reasoning)}</span>
     <span class="label">${L.totalTokens}</span>
+  </div>
+  <div class="global-stat">
+    <span class="value">$${(globalStats.cost || 0).toFixed(2)}</span>
+    <span class="label">${L.totalCost}</span>
   </div>
   <div class="global-stat">
     <span class="value">${formatNumber(globalStats.tokens_cache_read)}</span>
@@ -1471,6 +1601,44 @@ function toggleProject(projectId) {
   const el = document.getElementById('sessions-' + projectId);
   if (!el) return;
   el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+function loadMoreSessions(btn, cardId) {
+  const dir = btn.dataset.dir;
+  const loaded = parseInt(btn.dataset.loaded, 10);
+  const total = parseInt(btn.dataset.total, 10);
+  const limit = ${SESSIONS_PER_PAGE};
+
+  btn.disabled = true;
+  btn.textContent = LANG.loadingMore;
+
+  fetch('/api/sessions?dir=' + encodeURIComponent(dir) + '&offset=' + loaded + '&limit=' + limit)
+    .then(r => r.json())
+    .then(data => {
+      if (data.ok) {
+        const tbody = document.getElementById('tbody-' + cardId);
+        tbody.insertAdjacentHTML('beforeend', data.html);
+        const newLoaded = loaded + data.count;
+        btn.dataset.loaded = newLoaded;
+        if (newLoaded >= total || data.count < limit) {
+          // No more sessions to load — remove the button
+          const wrap = document.getElementById('loadmore-' + cardId);
+          if (wrap) wrap.remove();
+        } else {
+          btn.disabled = false;
+          btn.textContent = LANG.loadMore + ' (' + newLoaded + '/' + total + ')';
+        }
+      } else {
+        showToast(data.error || 'Failed', true);
+        btn.disabled = false;
+        btn.textContent = LANG.loadMore + ' (' + loaded + '/' + total + ')';
+      }
+    })
+    .catch(err => {
+      showToast('Error: ' + err.message, true);
+      btn.disabled = false;
+      btn.textContent = LANG.loadMore + ' (' + loaded + '/' + total + ')';
+    });
 }
 
 function openProject(directory) {
@@ -1863,6 +2031,36 @@ async function main() {
     if (req.method === "GET" && req.url === "/api/data") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(data));
+      return;
+    }
+
+    // GET /api/sessions?dir=<directory>&offset=<n>&limit=<n>
+    if (req.method === "GET" && req.url.startsWith("/api/sessions")) {
+      const params = new URL(req.url, `http://${HOST}`).searchParams;
+      const dir = params.get("dir");
+      const offset = parseInt(params.get("offset") || "0", 10);
+      const limit = Math.min(parseInt(params.get("limit") || String(SESSIONS_PER_PAGE), 10), 100);
+
+      if (!dir) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "dir parameter is required" }));
+        return;
+      }
+      if (!dbPath) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Database not available" }));
+        return;
+      }
+
+      queryMoreSessions(dbPath, dir, offset, limit)
+        .then((result) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, html: result.rowsHTML, count: result.count }));
+        })
+        .catch((err) => {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: err.message }));
+        });
       return;
     }
 
