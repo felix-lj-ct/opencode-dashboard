@@ -1,6 +1,6 @@
 {
   "name": "@felixli-ct/opencode-dashboard",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local web dashboard for browsing OpenCode session history across projects",
   "main": "dashboard.js",
   "bin": {
