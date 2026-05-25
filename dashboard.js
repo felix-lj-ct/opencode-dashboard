@@ -19,7 +19,7 @@ function emptyData() {
   return {
     globalStats: {
       total_sessions: 0, tokens_input: 0, tokens_output: 0, tokens_reasoning: 0,
-      tokens_cache_read: 0, tokens_cache_write: 0, cost: 0,
+      tokens_cache_read: 0, tokens_cache_write: 0, today_cost: 0, cost: 0,
       additions: 0, deletions: 0, files_changed: 0,
     },
     projectStats: [],
