@@ -3,7 +3,18 @@
 "use strict";
 
 const http = require("node:http");
+const https = require("node:https");
 const fs = require("node:fs");
+const { execFile } = require("node:child_process");
+const path = require("node:path");
+
+// ---------------------------------------------------------------------------
+// Package version (read once at startup)
+// ---------------------------------------------------------------------------
+const PKG_NAME = "@felixli-ct/opencode-dashboard";
+const PKG_VERSION = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "package.json"), "utf-8")
+).version;
 
 const { PORT, HOST, SESSIONS_PER_PAGE, getConfig, setConfig, saveConfig, getLang } = require("./lib/config");
 const { findDatabase } = require("./lib/db-locator");
@@ -63,7 +74,7 @@ async function main() {
     data = emptyData();
   }
 
-  let html = buildHTML(data, dbResult);
+  let html = buildHTML(data, dbResult, PKG_VERSION);
 
   // -----------------------------------------------------------------------
   // HTTP server & API routes
@@ -137,7 +148,7 @@ async function main() {
         if (language) cfg.language = language;
         setConfig(cfg);
         saveConfig(cfg);
-        html = buildHTML(data, dbResult);
+        html = buildHTML(data, dbResult, PKG_VERSION);
         console.log("Config saved:", terminal.name, "| fields:", (projectFields||[]).length, "| columns:", (sessionColumns||[]).length);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
@@ -172,7 +183,7 @@ async function main() {
         } else {
           Object.assign(data, emptyData());
         }
-        html = buildHTML(data, dbResult);
+        html = buildHTML(data, dbResult, PKG_VERSION);
         console.log("DB path updated:", dbPath || "(not found)", `(${dbResult.source || "none"})`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, dbPath: dbPath || null, source: dbResult.source }));
@@ -186,7 +197,7 @@ async function main() {
         Object.assign(cfg, fields);
         setConfig(cfg);
         saveConfig(cfg);
-        html = buildHTML(data, dbResult);
+        html = buildHTML(data, dbResult, PKG_VERSION);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
         return;
@@ -201,7 +212,7 @@ async function main() {
           cfg.hiddenDirs.push(directory);
           setConfig(cfg);
           saveConfig(cfg);
-          html = buildHTML(data, dbResult);
+          html = buildHTML(data, dbResult, PKG_VERSION);
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, hiddenDirs: cfg.hiddenDirs }));
@@ -216,7 +227,7 @@ async function main() {
           cfg.hiddenDirs = cfg.hiddenDirs.filter((d) => d !== directory);
           setConfig(cfg);
           saveConfig(cfg);
-          html = buildHTML(data, dbResult);
+          html = buildHTML(data, dbResult, PKG_VERSION);
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, hiddenDirs: cfg.hiddenDirs }));
@@ -236,9 +247,58 @@ async function main() {
         }
         const newData = await loadData(dbPath);
         Object.assign(data, newData);
-        html = buildHTML(data, dbResult);
+        html = buildHTML(data, dbResult, PKG_VERSION);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      // GET /api/version — current version + latest from npm registry
+      if (req.method === "GET" && req.url === "/api/version") {
+        // Fetch latest version from npm registry with hard timeout
+        const latest = await new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            req.destroy && req.destroy();
+            resolve(null);
+          }, 8000);
+          const url = `https://registry.npmjs.org/${PKG_NAME}/latest`;
+          const npmReq = https.get(url, { timeout: 5000 }, (resp) => {
+            let body = "";
+            resp.on("data", (chunk) => (body += chunk));
+            resp.on("end", () => {
+              clearTimeout(timer);
+              try { resolve(JSON.parse(body).version || null); }
+              catch { resolve(null); }
+            });
+          });
+          npmReq.on("error", () => { clearTimeout(timer); resolve(null); });
+          npmReq.on("timeout", () => { clearTimeout(timer); npmReq.destroy(); resolve(null); });
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, current: PKG_VERSION, latest }));
+        return;
+      }
+
+      // POST /api/update — run npm install -g to update to latest
+      if (req.method === "POST" && req.url === "/api/update") {
+        const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+        try {
+          const result = await new Promise((resolve, reject) => {
+            execFile(npmCmd, ["install", "-g", `${PKG_NAME}@latest`], {
+              timeout: 120000,
+            }, (err, stdout, stderr) => {
+              if (err) reject(new Error(stderr || err.message));
+              else resolve(stdout);
+            });
+          });
+          console.log("Update result:", result);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, output: result }));
+        } catch (updateErr) {
+          console.error("Update failed:", updateErr.message);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: updateErr.message }));
+        }
         return;
       }
 
