@@ -5,7 +5,7 @@
 const http = require("node:http");
 const https = require("node:https");
 const fs = require("node:fs");
-const { execFile } = require("node:child_process");
+const { exec } = require("node:child_process");
 const path = require("node:path");
 
 // ---------------------------------------------------------------------------
@@ -62,9 +62,8 @@ function compareVersions(a, b) {
 // ---------------------------------------------------------------------------
 function runNpmUpdate() {
   return new Promise((resolve, reject) => {
-    execFile("npm", ["install", "-g", `${PKG_NAME}@latest`], {
+    exec(`npm install -g ${PKG_NAME}@latest`, {
       timeout: 120000,
-      shell: true,
     }, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout);
@@ -124,33 +123,6 @@ async function main() {
     console.log("No database found. Starting with empty data.");
     console.log("Users can configure the database path in Settings.");
     data = emptyData();
-  }
-
-  // -----------------------------------------------------------------------
-  // Startup auto-update (non-blocking, best-effort)
-  // -----------------------------------------------------------------------
-  if (currentConfig.autoUpdate) {
-    console.log("Auto-update enabled, checking for updates...");
-    try {
-      const latest = await fetchLatestVersion();
-      if (latest && compareVersions(PKG_VERSION, latest) < 0) {
-        console.log(`New version available: ${PKG_VERSION} -> ${latest}, updating...`);
-        try {
-          const output = await runNpmUpdate();
-          console.log("Auto-update succeeded:", output.trim());
-          autoUpdateResult = { ok: true, from: PKG_VERSION, to: latest };
-        } catch (updateErr) {
-          console.warn("Auto-update failed:", updateErr.message);
-          autoUpdateResult = { ok: false, error: updateErr.message };
-        }
-      } else if (latest) {
-        console.log(`Already up to date (${PKG_VERSION})`);
-      } else {
-        console.log("Could not check for updates (network issue), skipping.");
-      }
-    } catch (e) {
-      console.warn("Auto-update check error:", e.message);
-    }
   }
 
   let html = buildHTML(data, dbResult, PKG_VERSION);
@@ -413,6 +385,33 @@ async function main() {
     console.log(`Dashboard running at ${url}`);
     console.log("Press Ctrl+C to stop");
     openBrowser(url);
+
+    // Background auto-update (non-blocking, after server is already up)
+    if (currentConfig.autoUpdate) {
+      (async () => {
+        console.log("Auto-update enabled, checking for updates...");
+        try {
+          const latest = await fetchLatestVersion();
+          if (latest && compareVersions(PKG_VERSION, latest) < 0) {
+            console.log(`New version available: ${PKG_VERSION} -> ${latest}, updating...`);
+            try {
+              const output = await runNpmUpdate();
+              console.log("Auto-update succeeded:", output.trim());
+              autoUpdateResult = { ok: true, from: PKG_VERSION, to: latest };
+            } catch (updateErr) {
+              console.warn("Auto-update failed:", updateErr.message);
+              autoUpdateResult = { ok: false, error: updateErr.message };
+            }
+          } else if (latest) {
+            console.log(`Already up to date (${PKG_VERSION})`);
+          } else {
+            console.log("Could not check for updates (network issue), skipping.");
+          }
+        } catch (e) {
+          console.warn("Auto-update check error:", e.message);
+        }
+      })();
+    }
   });
 }
 
