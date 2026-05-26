@@ -296,11 +296,25 @@ async function main() {
           res.end(JSON.stringify({ ok: false, error: getLang().dbNotFoundShort }));
           return;
         }
-        const newData = await loadData(dbPath);
-        Object.assign(data, newData);
-        html = buildHTML(data, dbResult, PKG_VERSION);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
+        // Verify the database file still exists and is readable before loading
+        if (!fs.existsSync(dbPath)) {
+          console.error("Refresh: database file no longer exists:", dbPath);
+          dbPath = null;
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: getLang().dbNotFoundShort }));
+          return;
+        }
+        try {
+          const newData = await loadData(dbPath);
+          Object.assign(data, newData);
+          html = buildHTML(data, dbResult, PKG_VERSION);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (refreshErr) {
+          console.error("Refresh error:", refreshErr);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: refreshErr.message || "Failed to reload data" }));
+        }
         return;
       }
 
@@ -414,6 +428,14 @@ async function main() {
     }
   });
 }
+
+// Prevent WASM or other unexpected errors from crashing the server
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception (server still running):", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection (server still running):", reason);
+});
 
 main().catch((err) => {
   console.error("Fatal error:", err);

@@ -1,10 +1,10 @@
 {
   "name": "@felixli-ct/opencode-dashboard",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Local web dashboard for browsing OpenCode session history across projects",
   "main": "dashboard.js",
   "bin": {
-    "opencode-dashboard": "./dashboard.js"
+    "opencode-dashboard": "dashboard.js"
   },
   "scripts": {
     "start": "node dashboard.js"
@@ -13,8 +13,7 @@
     "dashboard.js",
     "lib/",
     "README.md",
-    "LICENSE",
-    "docs/images/*.png"
+    "LICENSE"
   ],
   "dependencies": {
     "sql.js": "^1.11.0"
