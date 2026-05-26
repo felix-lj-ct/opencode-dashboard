@@ -2,7 +2,7 @@
 
 Local web dashboard for browsing OpenCode session history across all your projects.
 
-![Dashboard overview](docs/images/dashboard.png)
+![Dashboard overview](https://raw.githubusercontent.com/felix-lj-ct/opencode-dashboard/main/docs/images/dashboard.png)
 
 ## Features
 
@@ -52,7 +52,7 @@ Open **Settings** (top-right) to customize the dashboard.
 Pick a preset or define a custom terminal command. `{dir}` is replaced with the
 project directory when you click **Open** on a project card.
 
-![Terminal picker](docs/images/terminal-picker.png)
+![Terminal picker](https://raw.githubusercontent.com/felix-lj-ct/opencode-dashboard/main/docs/images/terminal-picker.png)
 
 Presets include Windows Terminal (fish / PowerShell / CMD), bare PowerShell,
 and CMD. On macOS/Linux you can supply your own command (e.g. `alacritty`,
@@ -63,7 +63,7 @@ and CMD. On macOS/Linux you can supply your own command (e.g. `alacritty`,
 Choose exactly which stats appear on each project card and which columns show
 up in the per-project session table.
 
-![Customize project card fields and session table columns](docs/images/customize-fields.png)
+![Customize project card fields and session table columns](https://raw.githubusercontent.com/felix-lj-ct/opencode-dashboard/main/docs/images/customize-fields.png)
 
 ## How It Works
 
